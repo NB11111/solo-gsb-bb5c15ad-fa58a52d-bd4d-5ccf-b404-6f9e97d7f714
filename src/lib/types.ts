@@ -40,3 +40,12 @@ export interface Conflict {
   /** 触发冲突的 cue id */
   cueId: string;
 }
+
+/** 两点同步预览：时间轴上的虚影块（应用前展示变换结果） */
+export interface GhostBlock {
+  id: string;
+  start: number;
+  end: number;
+  /** 预览计划存在冲突时以红色虚线显示 */
+  bad: boolean;
+}

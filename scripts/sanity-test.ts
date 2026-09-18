@@ -2,6 +2,7 @@ import assert from 'node:assert';
 import { parseTimecode, formatTimecode } from '../src/lib/time';
 import { parseVTT, serializeVTT } from '../src/lib/vtt';
 import { applyDrag } from '../src/lib/solver';
+import { planTwoPointSync } from '../src/lib/sync';
 import { detectIssues } from '../src/lib/issues';
 import {
   parseCueSettings,
@@ -323,6 +324,124 @@ const GAP = 0.1, MIN = 1;
   // 时序导出行为不变
   assert.ok(out.includes('00:00.000 --> 00:02.000'));
   ok('导出时未知 cue 设置顺序与内容保留');
+}
+
+// ---------- 两点同步 ----------
+
+// 18. 基本线性映射：区间内未锁定片段一并变换，区间外不变
+{
+  const cs = mk([
+    { id: 'a', s: 0, e: 2 },
+    { id: 'b', s: 2.5, e: 4 },
+    { id: 'c', s: 5, e: 6.5 },
+    { id: 'd', s: 10, e: 12 },
+    { id: 'e', s: 20, e: 22 },
+  ]);
+  // 锚点 a(0)→1、d(10)→13：scale = 1.2, offset = 1
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'd', newStartA: 1, newStartB: 13, minDuration: MIN, minGap: GAP });
+  assert.ok(r.mappable, r.error);
+  assert.ok(r.ok, JSON.stringify(r.conflicts));
+  assert.strictEqual(r.affectedIds.length, 4); // a,b,c,d
+  const A = get(r.cues, 'a'), B = get(r.cues, 'b'), C = get(r.cues, 'c'), D = get(r.cues, 'd'), E = get(r.cues, 'e');
+  assert.ok(Math.abs(A.start - 1) < 1e-6 && Math.abs(A.end - 3.4) < 1e-6);
+  assert.ok(Math.abs(B.start - 4) < 1e-6 && Math.abs(B.end - 5.8) < 1e-6);
+  assert.ok(Math.abs(C.start - 7) < 1e-6 && Math.abs(C.end - 8.8) < 1e-6);
+  assert.ok(Math.abs(D.start - 13) < 1e-6 && Math.abs(D.end - 15.4) < 1e-6);
+  assert.deepStrictEqual([E.start, E.end], [20, 22]); // 区间外不变
+  ok('两点同步：线性映射变换区间内片段，区间外不变');
+}
+
+// 19. 锚点选择顺序无关（按旧开始时间自动排序）
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 10, e: 12 }]);
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'b', anchorBId: 'a', newStartA: 13, newStartB: 1, minDuration: MIN, minGap: GAP });
+  assert.ok(r.mappable, r.error);
+  assert.ok(r.ok, JSON.stringify(r.conflicts));
+  assert.ok(Math.abs(get(r.cues, 'a').start - 1) < 1e-6);
+  assert.ok(Math.abs(get(r.cues, 'b').start - 13) < 1e-6);
+  ok('两点同步：锚点选择顺序无关');
+}
+
+// 20. 锁定片段不变；撞上锁定片段 => 冲突并禁止应用
+{
+  const cs = mk([
+    { id: 'a', s: 0, e: 2 },
+    { id: 'L', s: 3, e: 5, l: true },
+    { id: 'b', s: 10, e: 12 },
+  ]);
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 2, newStartB: 14, minDuration: MIN, minGap: GAP });
+  assert.ok(r.mappable, r.error);
+  assert.strictEqual(r.affectedIds.includes('L'), false);
+  assert.deepStrictEqual([get(r.cues, 'L').start, get(r.cues, 'L').end], [3, 5]); // 锁定不变
+  assert.strictEqual(r.ok, false); // a → [2,4.4] 与 L(3,5) 重叠
+  assert.ok(r.conflicts.some((c) => c.cueIds.includes('L') && c.cueIds.includes('a')));
+  ok('两点同步：锁定片段不变，重叠冲突禁止应用');
+}
+
+// 21. 新锚点顺序无效 => 禁止
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 10, e: 12 }]);
+  const rev = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 20, newStartB: 13, minDuration: MIN, minGap: GAP });
+  assert.strictEqual(rev.mappable, false);
+  assert.strictEqual(rev.ok, false);
+  const flat = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 5, newStartB: 5, minDuration: MIN, minGap: GAP });
+  assert.strictEqual(flat.mappable, false);
+  const neg = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: -1, newStartB: 9, minDuration: MIN, minGap: GAP });
+  assert.strictEqual(neg.mappable, false);
+  ok('两点同步：新锚点顺序无效（逆序/相等/为负）=> 禁止');
+}
+
+// 22. 变换后时长低于最小时长 => 冲突并禁止应用
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 3, e: 4.5 }, { id: 'c', s: 10, e: 12 }]);
+  // a(0)→0、c(10)→5：scale = 0.5，b 时长 1.5 → 0.75 < 1
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'c', newStartA: 0, newStartB: 5, minDuration: MIN, minGap: GAP });
+  assert.ok(r.mappable, r.error);
+  assert.strictEqual(r.ok, false);
+  assert.ok(r.conflicts.some((x) => x.cueIds.length === 1 && x.cueIds[0] === 'b' && x.reason.includes('时长')));
+  ok('两点同步：变换后时长不足 => 冲突');
+}
+
+// 23. 区间两侧边界的相邻片段间隔不足 => 冲突并禁止应用
+{
+  const cs = mk([{ id: 'z', s: 0, e: 1.5 }, { id: 'a', s: 2, e: 4 }, { id: 'b', s: 10, e: 12 }]);
+  // a(2)→1.4：与区间外的 z(0,1.5) 重叠（左边界）
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 1.4, newStartB: 11.4, minDuration: MIN, minGap: GAP });
+  assert.ok(r.mappable, r.error);
+  assert.strictEqual(r.ok, false);
+  assert.ok(r.conflicts.some((x) => x.cueIds.includes('z')));
+  ok('两点同步：边界相邻片段间隔不足 => 冲突');
+}
+
+// 24. 区间内片段间隔收缩后仍满足最小间隔 => 允许应用
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 3, e: 5 }, { id: 'c', s: 10, e: 12 }]);
+  // a(0)→0、c(10)→8：scale = 0.8，b → [2.4,4]，间隔 0.4 ≥ 0.1
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'c', newStartA: 0, newStartB: 8, minDuration: MIN, minGap: GAP });
+  assert.ok(r.mappable, r.error);
+  assert.ok(r.ok, JSON.stringify(r.conflicts));
+  const B = get(r.cues, 'b');
+  assert.ok(Math.abs(B.start - 2.4) < 1e-6 && Math.abs(B.end - 4) < 1e-6);
+  ok('两点同步：间隔收缩但仍满足 => 允许应用');
+}
+
+// 25. 非法锚点（锁定/相同/开始时间相同）=> 禁止
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2, l: true }, { id: 'b', s: 10, e: 12 }]);
+  assert.strictEqual(planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 1, newStartB: 13, minDuration: MIN, minGap: GAP }).mappable, false);
+  assert.strictEqual(planTwoPointSync({ cues: cs, anchorAId: 'b', anchorBId: 'b', newStartA: 1, newStartB: 13, minDuration: MIN, minGap: GAP }).mappable, false);
+  const sameStart = mk([{ id: 'x', s: 1, e: 2 }, { id: 'y', s: 1, e: 3 }]);
+  assert.strictEqual(planTwoPointSync({ cues: sameStart, anchorAId: 'x', anchorBId: 'y', newStartA: 1, newStartB: 5, minDuration: MIN, minGap: GAP }).mappable, false);
+  ok('两点同步：锁定/相同/同开始时间的锚点 => 禁止');
+}
+
+// 26. 求解不修改输入（不得部分写入的前置保证）
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 10, e: 12 }]);
+  const snapshot = JSON.parse(JSON.stringify(cs));
+  planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 3, newStartB: 17, minDuration: MIN, minGap: GAP });
+  assert.deepStrictEqual(cs, snapshot);
+  ok('两点同步：求解不修改输入数组');
 }
 
 console.log(`\n全部 ${passed} 组测试通过 ✅`);

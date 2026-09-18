@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Conflict, Cue, Settings } from './lib/types';
+import type { Conflict, Cue, GhostBlock, Settings } from './lib/types';
 import { parseVTT, serializeVTT } from './lib/vtt';
 import { detectIssues } from './lib/issues';
 import { uid } from './lib/time';
@@ -8,6 +8,7 @@ import Timeline from './components/Timeline';
 import Inspector from './components/Inspector';
 import IssuesPanel from './components/IssuesPanel';
 import SettingsPanel from './components/SettingsPanel';
+import TwoPointSyncPanel from './components/TwoPointSyncPanel';
 import CueList from './components/CueList';
 import ImportModal from './components/ImportModal';
 import LayoutPreview from './components/LayoutPreview';
@@ -22,6 +23,7 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [pps, setPps] = useState(60);
   const [toast, setToast] = useState<string | null>(null);
+  const [syncGhosts, setSyncGhosts] = useState<GhostBlock[] | null>(null);
 
   const scrollToRef = useRef<(id: string) => void>(() => {});
 
@@ -89,8 +91,17 @@ export default function App() {
     setCues(c);
     setPreamble(p);
     setConflict(null);
+    setSyncGhosts(null);
     setSelectedId(c[0]?.id ?? null);
   }
+
+  /** 两点同步确认应用：一次性写入全部校准结果 */
+  const applySync = useCallback((next: Cue[], count: number) => {
+    setCues(next);
+    setConflict(null);
+    setSyncGhosts(null);
+    setToast(`两点同步完成：已校准 ${count} 个片段，区间外与锁定片段保持不变。`);
+  }, []);
 
   function exportVTT() {
     if (cues.length === 0) {
@@ -121,7 +132,7 @@ export default function App() {
           <span className="logo">🎞️</span>
           <div>
             <h1>WebVTT 字幕时序修复器</h1>
-            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 布局预览</span>
+            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 两点同步 · 布局预览</span>
           </div>
         </div>
         <div className="header-actions">
@@ -142,6 +153,7 @@ export default function App() {
             selectedId={selectedId}
             conflict={conflict}
             issues={timingIssues}
+            ghosts={syncGhosts}
             pps={pps}
             onPps={setPps}
             onSelect={setSelectedId}
@@ -177,6 +189,16 @@ export default function App() {
 
         <aside className="side-col">
           <SettingsPanel settings={settings} onChange={setSettings} />
+          <TwoPointSyncPanel
+            cues={cues}
+            settings={settings}
+            onGhosts={setSyncGhosts}
+            onApply={applySync}
+            onJump={(id) => {
+              setSelectedId(id);
+              scrollToRef.current(id);
+            }}
+          />
           <LayoutPreview cue={selected} />
           <Inspector
             cue={selected}

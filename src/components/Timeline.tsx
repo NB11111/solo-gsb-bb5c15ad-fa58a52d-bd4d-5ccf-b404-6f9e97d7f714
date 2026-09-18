@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Conflict, Cue, DragOp, Issue, Settings } from '../lib/types';
+import type { Conflict, Cue, DragOp, GhostBlock, Issue, Settings } from '../lib/types';
 import { applyDrag } from '../lib/solver';
 import { formatTick, formatTimecode } from '../lib/time';
 
@@ -30,6 +30,8 @@ interface Props {
   selectedId: string | null;
   conflict: Conflict | null;
   issues: Issue[];
+  /** 两点同步的虚影预览块（null 表示无预览） */
+  ghosts: GhostBlock[] | null;
   pps: number;
   onPps: (pps: number) => void;
   onSelect: (id: string) => void;
@@ -68,7 +70,7 @@ function niceStep(pps: number): number {
 }
 
 export default function Timeline(props: Props) {
-  const { cues, settings, selectedId, conflict, issues, pps } = props;
+  const { cues, settings, selectedId, conflict, issues, pps, ghosts } = props;
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -77,12 +79,14 @@ export default function Timeline(props: Props) {
   const [, forceTick] = useState(0);
 
   const { items, lanes } = useMemo(() => assignLanes(cues), [cues]);
+  const laneById = useMemo(() => new Map(items.map((i) => [i.id, i.lane] as const)), [items]);
   const trackHeight = lanes * (LANE_HEIGHT + LANE_GAP) + 12;
 
   const extent = useMemo(() => {
     const endMax = cues.reduce((m, c) => Math.max(m, c.end), 0);
-    return Math.max(30, endMax * 1.18 + 4, (conflict ? conflict.range[1] : 0) + 2);
-  }, [cues, conflict]);
+    const ghostEnd = (ghosts ?? []).reduce((m, g) => Math.max(m, g.end), 0);
+    return Math.max(30, endMax * 1.18 + 4, (conflict ? conflict.range[1] : 0) + 2, ghostEnd + 2);
+  }, [cues, conflict, ghosts]);
 
   const step = niceStep(pps);
   const ticks: number[] = [];
@@ -285,6 +289,25 @@ export default function Timeline(props: Props) {
                     <span className="cue-text">{firstLine(c.text)}</span>
                   </div>
                 </div>
+              );
+            })}
+
+            {/* 两点同步虚影预览（应用前展示校准结果） */}
+            {ghosts?.map((g) => {
+              const lane = laneById.get(g.id);
+              if (lane === undefined) return null;
+              return (
+                <div
+                  key={`ghost-${g.id}`}
+                  className={`cue-ghost${g.bad ? ' bad' : ''}`}
+                  style={{
+                    left: g.start * pps,
+                    width: Math.max(10, (g.end - g.start) * pps),
+                    top: 6 + lane * (LANE_HEIGHT + LANE_GAP),
+                    height: LANE_HEIGHT,
+                  }}
+                  title="两点同步预览位置"
+                />
               );
             })}
           </div>
