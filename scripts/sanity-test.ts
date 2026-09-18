@@ -2,6 +2,7 @@ import assert from 'node:assert';
 import { parseTimecode, formatTimecode } from '../src/lib/time';
 import { parseVTT, serializeVTT } from '../src/lib/vtt';
 import { applyDrag } from '../src/lib/solver';
+import { planTwoPointSync } from '../src/lib/sync';
 import { detectIssues } from '../src/lib/issues';
 import {
   parseCueSettings,
@@ -323,6 +324,115 @@ const GAP = 0.1, MIN = 1;
   // 时序导出行为不变
   assert.ok(out.includes('00:00.000 --> 00:02.000'));
   ok('导出时未知 cue 设置顺序与内容保留');
+}
+
+// ---------- 两点同步 ----------
+
+// 18. 基本线性映射：闭区间内未锁定片段全部变换，区间外不变
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 3, e: 5 }, { id: 'c', s: 6, e: 8 }, { id: 'd', s: 20, e: 22 }]);
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'c', newStartA: 10, newStartB: 14, minDuration: 1, minGap: 0.1 });
+  assert.ok(r.feasible, r.conflicts.map((x) => x.reason).join('；'));
+  // scale = (14-10)/(6-0) = 2/3，offset = 10
+  assert.ok(Math.abs(r.scale - 2 / 3) < 1e-9);
+  assert.ok(Math.abs(r.offset - 10) < 1e-9);
+  assert.deepStrictEqual([...r.affectedIds].sort(), ['a', 'b', 'c']);
+  const b = get(r.cues, 'b');
+  assert.ok(Math.abs(b.start - 12) < 1e-6 && Math.abs(b.end - 40 / 3) < 1e-6);
+  const a2 = get(r.cues, 'a');
+  assert.ok(Math.abs(a2.start - 10) < 1e-6 && Math.abs(a2.end - 34 / 3) < 1e-6);
+  const d = get(r.cues, 'd');
+  assert.deepStrictEqual([d.start, d.end], [20, 22]);
+  ok('两点同步：线性映射变换闭区间内片段，区间外不变');
+}
+
+// 19. 区间内锁定片段保持不变；与其碰撞 => 禁止应用且不部分写入
+{
+  const cs = mk([{ id: 'a', s: 10, e: 12 }, { id: 'L', s: 12.1, e: 14, l: true }, { id: 'b', s: 14.1, e: 16 }]);
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 10, newStartB: 13, minDuration: 1, minGap: 0.1 });
+  assert.strictEqual(r.feasible, false);
+  assert.ok(r.conflicts.length >= 1);
+  assert.ok(r.conflicts.some((c) => c.cueIds.includes('L')));
+  // 不部分写入：返回的 cues 与原始一致
+  assert.strictEqual(get(r.cues, 'a').start, 10);
+  assert.strictEqual(get(r.cues, 'b').start, 14.1);
+  assert.strictEqual(get(r.cues, 'L').start, 12.1);
+  ok('两点同步：锁定片段不变，冲突时禁止应用且不部分写入');
+}
+
+// 20. 新旧锚点顺序无效均被拒绝
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 5, e: 7 }]);
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 10, newStartB: 9, minDuration: 1, minGap: 0.1 });
+  assert.strictEqual(r.feasible, false);
+  assert.ok(r.conflicts[0].reason.includes('顺序'));
+  // 锚点先后颠倒（锚点 1 晚于锚点 2）同样无效
+  const r2 = planTwoPointSync({ cues: cs, anchorAId: 'b', anchorBId: 'a', newStartA: 5, newStartB: 6, minDuration: 1, minGap: 0.1 });
+  assert.strictEqual(r2.feasible, false);
+  assert.ok(r2.conflicts[0].reason.includes('顺序'));
+  ok('两点同步：新旧锚点顺序无效均被拒绝');
+}
+
+// 21. 变换后时长低于当前最小时长 => 禁止并列出冲突片段
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 10, e: 12 }]);
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 0, newStartB: 4, minDuration: 1, minGap: 0.1 });
+  assert.strictEqual(r.feasible, false);
+  assert.ok(r.conflicts.some((c) => c.reason.includes('时长') && c.cueIds.includes('a')));
+  assert.ok(r.conflicts.some((c) => c.reason.includes('时长') && c.cueIds.includes('b')));
+  ok('两点同步：变换后时长低于最小时长被拒绝');
+}
+
+// 22. 区间边界相邻片段间隔不足 => 禁止并列出两侧片段
+{
+  const cs = mk([{ id: 'x', s: 0, e: 1 }, { id: 'a', s: 2, e: 4 }, { id: 'b', s: 8, e: 10 }]);
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 1.05, newStartB: 7.05, minDuration: 1, minGap: 0.1 });
+  assert.strictEqual(r.feasible, false);
+  assert.ok(r.conflicts.some((c) => c.cueIds.includes('x') && c.cueIds.includes('a')));
+  ok('两点同步：区间边界相邻片段间隔不足被拒绝');
+}
+
+// 23. 校准后不得早于时间轴起点
+{
+  const cs = mk([{ id: 'a', s: 1, e: 2 }, { id: 'b', s: 5, e: 6 }]);
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: -0.5, newStartB: 3.5, minDuration: 1, minGap: 0.1 });
+  assert.strictEqual(r.feasible, false);
+  assert.ok(r.conflicts.some((c) => c.reason.includes('00:00')));
+  ok('两点同步：校准后早于 00:00.000 被拒绝');
+}
+
+// 24. 锚点必须未锁定且互不相同
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2, l: true }, { id: 'b', s: 5, e: 7 }]);
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 0, newStartB: 5, minDuration: 1, minGap: 0.1 });
+  assert.strictEqual(r.feasible, false);
+  assert.ok(r.conflicts[0].reason.includes('锁定'));
+  const r2 = planTwoPointSync({ cues: cs, anchorAId: 'b', anchorBId: 'b', newStartA: 0, newStartB: 5, minDuration: 1, minGap: 0.1 });
+  assert.strictEqual(r2.feasible, false);
+  ok('两点同步：锚点必须未锁定且互不相同');
+}
+
+// 25. 可行时区间内锁定片段保持不动，输入数组不被原地修改
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'L', s: 2.5, e: 3.5, l: true }, { id: 'b', s: 4, e: 6 }]);
+  const snapshot = JSON.parse(JSON.stringify(cs));
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 0.4, newStartB: 4.4, minDuration: 1, minGap: 0.1 });
+  assert.ok(r.feasible, r.conflicts.map((x) => x.reason).join('；'));
+  assert.deepStrictEqual([get(r.cues, 'L').start, get(r.cues, 'L').end], [2.5, 3.5]);
+  assert.ok(Math.abs(get(r.cues, 'a').start - 0.4) < 1e-6);
+  assert.ok(Math.abs(get(r.cues, 'b').start - 4.4) < 1e-6);
+  assert.deepStrictEqual(cs, snapshot);
+  ok('两点同步：可行时锁定片段不动，输入不被修改');
+}
+
+// 26. 恒等映射可识别（面板据此禁用应用）
+{
+  const cs = mk([{ id: 'a', s: 0, e: 2 }, { id: 'b', s: 5, e: 7 }]);
+  const r = planTwoPointSync({ cues: cs, anchorAId: 'a', anchorBId: 'b', newStartA: 0, newStartB: 5, minDuration: 1, minGap: 0.1 });
+  assert.ok(r.feasible);
+  assert.strictEqual(r.identity, true);
+  assert.deepStrictEqual(r.affectedIds.sort(), ['a', 'b']);
+  ok('两点同步：恒等映射可识别');
 }
 
 console.log(`\n全部 ${passed} 组测试通过 ✅`);

@@ -31,6 +31,8 @@ interface Props {
   conflict: Conflict | null;
   issues: Issue[];
   pps: number;
+  /** 两点同步的虚影预览片段（变换后的受影响片段，与现有片段同 id） */
+  ghosts?: Cue[];
   onPps: (pps: number) => void;
   onSelect: (id: string) => void;
   onCommit: (cues: Cue[]) => void;
@@ -68,7 +70,7 @@ function niceStep(pps: number): number {
 }
 
 export default function Timeline(props: Props) {
-  const { cues, settings, selectedId, conflict, issues, pps } = props;
+  const { cues, settings, selectedId, conflict, issues, pps, ghosts = [] } = props;
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -77,12 +79,18 @@ export default function Timeline(props: Props) {
   const [, forceTick] = useState(0);
 
   const { items, lanes } = useMemo(() => assignLanes(cues), [cues]);
+  const laneById = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const it of items) m.set(it.id, it.lane);
+    return m;
+  }, [items]);
   const trackHeight = lanes * (LANE_HEIGHT + LANE_GAP) + 12;
 
   const extent = useMemo(() => {
     const endMax = cues.reduce((m, c) => Math.max(m, c.end), 0);
-    return Math.max(30, endMax * 1.18 + 4, (conflict ? conflict.range[1] : 0) + 2);
-  }, [cues, conflict]);
+    const ghostMax = ghosts.reduce((m, c) => Math.max(m, c.end), 0);
+    return Math.max(30, endMax * 1.18 + 4, ghostMax + 2, (conflict ? conflict.range[1] : 0) + 2);
+  }, [cues, ghosts, conflict]);
 
   const step = niceStep(pps);
   const ticks: number[] = [];
@@ -287,6 +295,25 @@ export default function Timeline(props: Props) {
                 </div>
               );
             })}
+
+            {/* 两点同步虚影预览：与原片段同泳道，虚线框标示校准后的位置 */}
+            {ghosts.map((g) => (
+              <div
+                key={`ghost-${g.id}`}
+                className="cue-block ghost"
+                style={{
+                  left: g.start * pps,
+                  width: Math.max(10, (g.end - g.start) * pps),
+                  top: 6 + (laneById.get(g.id) ?? 0) * (LANE_HEIGHT + LANE_GAP),
+                  height: LANE_HEIGHT,
+                }}
+                title={`预览：${formatTimecode(g.start)} → ${formatTimecode(g.end)}`}
+              >
+                <div className="cue-label">
+                  <span className="cue-text">{firstLine(g.text)}</span>
+                </div>
+              </div>
+            ))}
           </div>
 
           {/* 拖动时间提示 */}

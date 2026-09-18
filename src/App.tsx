@@ -11,6 +11,7 @@ import SettingsPanel from './components/SettingsPanel';
 import CueList from './components/CueList';
 import ImportModal from './components/ImportModal';
 import LayoutPreview from './components/LayoutPreview';
+import SyncPanel from './components/SyncPanel';
 
 export default function App() {
   const initial = useMemo(() => parseVTT(SAMPLE_VTT), []);
@@ -22,6 +23,7 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [pps, setPps] = useState(60);
   const [toast, setToast] = useState<string | null>(null);
+  const [syncGhosts, setSyncGhosts] = useState<Cue[]>([]);
 
   const scrollToRef = useRef<(id: string) => void>(() => {});
 
@@ -121,7 +123,7 @@ export default function App() {
           <span className="logo">🎞️</span>
           <div>
             <h1>WebVTT 字幕时序修复器</h1>
-            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 布局预览</span>
+            <span className="muted small">本地运行 · 拖动传播 · 锁定保护 · 布局预览 · 两点同步</span>
           </div>
         </div>
         <div className="header-actions">
@@ -143,6 +145,7 @@ export default function App() {
             conflict={conflict}
             issues={timingIssues}
             pps={pps}
+            ghosts={syncGhosts}
             onPps={setPps}
             onSelect={setSelectedId}
             onCommit={setCues}
@@ -177,6 +180,22 @@ export default function App() {
 
         <aside className="side-col">
           <SettingsPanel settings={settings} onChange={setSettings} />
+          <SyncPanel
+            cues={sortedCues}
+            settings={settings}
+            onPreview={setSyncGhosts}
+            onApply={(next, affected) => {
+              // 确认后一次性写入全部校准结果
+              setCues(next);
+              setConflict(null);
+              setSyncGhosts([]);
+              setToast(`两点同步完成：已校准 ${affected} 个片段。`);
+            }}
+            onJump={(id) => {
+              setSelectedId(id);
+              scrollToRef.current(id);
+            }}
+          />
           <LayoutPreview cue={selected} />
           <Inspector
             cue={selected}
